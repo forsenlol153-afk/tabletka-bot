@@ -4,6 +4,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 import json
 from datetime import datetime, time, timedelta
+from threading import Thread
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -46,10 +48,26 @@ def save_data(data):
 def get_today():
     return datetime.now().strftime("%Y-%m-%d")
 
-# 🔒 Проверка доступа
 def is_allowed(user_id: int) -> bool:
     return user_id in ALLOWED_USERS
 
+# === HTTP-сервер для Render (обход ограничения порта) ===
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def run_http_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
+
+# Запускаем HTTP-сервер в фоне
+Thread(target=run_http_server, daemon=True).start()
+
+# === ОСНОВНОЙ КОД БОТА (без изменений) ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not is_allowed(user.id):
@@ -66,7 +84,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     user_id = job.data["user_id"]
-    # Напоминание отправляется только разрешённому пользователю — проверка уже при /start
     pill_time = job.data["pill_time"]
     today = get_today()
 
@@ -102,7 +119,7 @@ async def check_if_taken(context: ContextTypes.DEFAULT_TYPE):
     if not taken:
         try:
             await context.bot.send_message(
-                chat_id=157901324,  # Ты — всегда получаешь уведомления
+                chat_id=157901324,
                 text=f"⚠️ Твоя котик-девушка ещё не отметила приём {pill_time} таблетки ({date}).\nМожет, стоит нежно напомнить? 💬"
             )
         except Exception as e:
