@@ -18,11 +18,12 @@ TOKEN = os.environ["BOT_TOKEN"]
 # 👤 Разрешённые пользователи
 ALLOWED_USERS = {
     157901324,  # Твой ID
-    382950376   # ← ЗАМЕНИ НА ЕЁ ID!
+    382950376   # ID твоей девушки
 }
 
 DATA_FILE = "/tmp/pill_data.json"
 
+# Расписание приёмов (МСК → UTC)
 SCHEDULE = [
     {"time_utc": time(7, 0), "label": "утренняя", "hour_msk": 10},
     {"time_utc": time(11, 0), "label": "дневная", "hour_msk": 14},
@@ -51,13 +52,22 @@ def get_today():
 def is_allowed(user_id: int) -> bool:
     return user_id in ALLOWED_USERS
 
-# === HTTP-сервер для Render (обход ограничения порта) ===
+# === HTTP-сервер для Render (поддержка GET и HEAD) ===
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
         self.wfile.write(b"OK")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        # Отключаем логирование health-check запросов
+        pass
 
 def run_http_server():
     port = int(os.environ.get("PORT", 10000))
@@ -67,7 +77,7 @@ def run_http_server():
 # Запускаем HTTP-сервер в фоне
 Thread(target=run_http_server, daemon=True).start()
 
-# === ОСНОВНОЙ КОД БОТА (без изменений) ===
+# === ОСНОВНОЙ КОД БОТА ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not is_allowed(user.id):
@@ -251,14 +261,14 @@ async def schedule_jobs(app: Application):
 
     job_queue.run_daily(
         daily_report,
-        time=time(20, 30),
+        time=time(20, 30),  # = 23:30 МСК
         name="daily_report"
     )
 
     job_queue.run_daily(
         weekly_report,
-        time=time(20, 30),
-        days=(6,),
+        time=time(20, 30),  # = 23:30 МСК
+        days=(6,),          # воскресенье
         name="weekly_report"
     )
 
