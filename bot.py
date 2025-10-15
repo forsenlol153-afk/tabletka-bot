@@ -13,12 +13,14 @@ logger = logging.getLogger(__name__)
 
 TOKEN = os.environ["BOT_TOKEN"]
 
-# 👤 Твой Telegram ID (уже вставлен!)
-ADMIN_USER_ID = 157901324
+# 👤 Разрешённые пользователи
+ALLOWED_USERS = {
+    157901324,  # Твой ID
+    382950376   # ← ЗАМЕНИ НА ЕЁ ID!
+}
 
 DATA_FILE = "/tmp/pill_data.json"
 
-# Время приёмов (по Москве → UTC = -3 часа)
 SCHEDULE = [
     {"time_utc": time(7, 0), "label": "утренняя", "hour_msk": 10},
     {"time_utc": time(11, 0), "label": "дневная", "hour_msk": 14},
@@ -42,10 +44,18 @@ def save_data(data):
         json.dump(data, f, indent=4)
 
 def get_today():
-    return datetime.utcnow().strftime("%Y-%m-%d")
+    return datetime.now().strftime("%Y-%m-%d")
+
+# 🔒 Проверка доступа
+def is_allowed(user_id: int) -> bool:
+    return user_id in ALLOWED_USERS
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    if not is_allowed(user.id):
+        await update.message.reply_text("🔒 Извини, этот бот только для избранных котиков 🐾")
+        return
+
     data = load_data()
     data["user_id"] = user.id
     today = get_today()
@@ -56,6 +66,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     user_id = job.data["user_id"]
+    # Напоминание отправляется только разрешённому пользователю — проверка уже при /start
     pill_time = job.data["pill_time"]
     today = get_today()
 
@@ -91,7 +102,7 @@ async def check_if_taken(context: ContextTypes.DEFAULT_TYPE):
     if not taken:
         try:
             await context.bot.send_message(
-                chat_id=ADMIN_USER_ID,
+                chat_id=157901324,  # Ты — всегда получаешь уведомления
                 text=f"⚠️ Твоя котик-девушка ещё не отметила приём {pill_time} таблетки ({date}).\nМожет, стоит нежно напомнить? 💬"
             )
         except Exception as e:
@@ -102,8 +113,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     user_id = query.from_user.id
+    if not is_allowed(user_id):
+        await query.message.reply_text("🔒 Ты не можешь использовать этого бота.")
+        return
+
     data = load_data()
-    
     if data.get("user_id") != user_id:
         await query.edit_message_text(text="Это не твоя таблетка 😉")
         return
@@ -120,17 +134,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await context.bot.send_message(
-            chat_id=ADMIN_USER_ID,
+            chat_id=157901324,
             text=f"✅ Твоя котик-девушка только что выпила {pill_time} таблеточку! 🐾\nВремя: {datetime.now().strftime('%d.%m в %H:%M')}"
         )
     except Exception as e:
         logger.error(f"Не удалось отправить уведомление админу: {e}")
 
-# Ежедневный отчёт в 23:30 МСК (20:30 UTC)
 async def daily_report(context: ContextTypes.DEFAULT_TYPE):
     data = load_data()
     user_id = data.get("user_id")
-    if not user_id:
+    if not user_id or user_id not in ALLOWED_USERS:
         return
 
     today = get_today()
@@ -156,20 +169,19 @@ async def daily_report(context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await context.bot.send_message(
-            chat_id=ADMIN_USER_ID,
+            chat_id=157901324,
             text=f"📆 Отчёт за {today}:\n{taken_count}/3 приёмов"
         )
     except Exception as e:
         logger.error(f"Не удалось отправить отчёт админу: {e}")
 
-# Еженедельный отчёт (воскресенье, 23:30 МСК)
 async def weekly_report(context: ContextTypes.DEFAULT_TYPE):
     data = load_data()
     user_id = data.get("user_id")
-    if not user_id:
+    if not user_id or user_id not in ALLOWED_USERS:
         return
 
-    today = datetime.utcnow().date()
+    today = datetime.now().date()
     dates = [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
     
     total_taken = 0
@@ -198,17 +210,16 @@ async def weekly_report(context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await context.bot.send_message(
-            chat_id=ADMIN_USER_ID,
+            chat_id=157901324,
             text=f"📊 Недельный отчёт:\n{total_taken}/{total_possible} таблеток"
         )
     except Exception as e:
         logger.error(f"Не удалось отправить недельный отчёт админу: {e}")
 
-# Планировщик
 async def schedule_jobs(app: Application):
     data = load_data()
     user_id = data.get("user_id")
-    if not user_id:
+    if not user_id or user_id not in ALLOWED_USERS:
         return
 
     job_queue = app.job_queue
