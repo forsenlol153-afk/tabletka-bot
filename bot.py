@@ -79,17 +79,25 @@ Thread(target=run_http_server, daemon=True).start()
 
 # === ОСНОВНОЙ КОД БОТА ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not is_allowed(user.id):
-        await update.message.reply_text("🔒 Извини, этот бот только для избранных котиков 🐾")
-        return
+    try:
+        user = update.effective_user
+        if not is_allowed(user.id):
+            await update.message.reply_text("🔒 Извини, этот бот только для избранных котиков 🐾")
+            return
 
-    data = load_data()
-    data["user_id"] = user.id
-    today = get_today()
-    data["history"].setdefault(today, {"утренняя": False, "дневная": False, "вечерняя": False})
-    save_data(data)
-    await update.message.reply_text("Привет, котик! Я буду напоминать тебе пить таблетки три раза в день ❤️")
+        # Принудительно создаём чистый файл, если его нет или он битый
+        data = {
+            "user_id": user.id,
+            "history": {}
+        }
+        today = get_today()
+        data["history"][today] = {"утренняя": False, "дневная": False, "вечерняя": False}
+        save_data(data)
+
+        await update.message.reply_text("✅ Бот активирован! Напоминания придут в 10:00, 14:00 и 23:00 по Москве ❤️")
+    except Exception as e:
+        logger.error(f"Ошибка в /start: {e}")
+        await update.message.reply_text("⚠️ Произошла ошибка. Попробуй позже.")
 
 async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
