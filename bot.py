@@ -1,137 +1,244 @@
 import logging
 import os
-import json
-from datetime import datetime, time, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+import json
+from datetime import datetime, time, timedelta
 
-# Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Токен из переменной окружения (безопасно!)
 TOKEN = os.environ["BOT_TOKEN"]
 
-# Файл данных — сохраняем в /tmp (работает на Render)
-DATA_FILE = "/tmp/user_data.json"
+# 👤 Твой Telegram ID (уже вставлен!)
+ADMIN_USER_ID = 157901324
 
-# Загрузка данных
+DATA_FILE = "/tmp/pill_data.json"
+
+# Время приёмов (по Москве → UTC = -3 часа)
+SCHEDULE = [
+    {"time_utc": time(7, 0), "label": "утренняя", "hour_msk": 10},
+    {"time_utc": time(11, 0), "label": "дневная", "hour_msk": 14},
+    {"time_utc": time(20, 0), "label": "вечерняя", "hour_msk": 23}
+]
+
 def load_data():
     try:
         with open(DATA_FILE, 'r') as f:
             return json.load(f)
     except FileNotFoundError:
-        return {"last_taken": None, "user_id": None}
+        return {
+            "user_id": None,
+            "history": {}
+        }
 
-# Сохранение данных
 def save_data(data):
+    recent_dates = sorted(data["history"].keys())[-14:]
+    data["history"] = {d: data["history"][d] for d in recent_dates}
     with open(DATA_FILE, 'w') as f:
         json.dump(data, f, indent=4)
 
-# Мотивирующие фразы
-MOTIVATIONAL_PHRASES = [
-    "Отлично, что ты выпила таблеточку — ты настоящая героиня!",
-    "Молодец! Ты заботишься о себе — это самое важное 💖",
-    "Ты супер! Так держать 👏",
-    "Таблеточка принята? Уже на пути к здоровью! 🌿",
-    "Я горжусь тобой! 🐱"
-]
+def get_today():
+    return datetime.utcnow().strftime("%Y-%m-%d")
 
-# Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     data = load_data()
     data["user_id"] = user.id
+    today = get_today()
+    data["history"].setdefault(today, {"утренняя": False, "дневная": False, "вечерняя": False})
     save_data(data)
-    await update.message.reply_text(
-        "Привет, котик! 💊\nЯ буду напоминать тебе пить таблетки в 10:00, 14:00 и 23:00.\n\nНажми на кнопку, когда выпьёшь — я похвалю тебя! ❤️"
-    )
+    await update.message.reply_text("Привет, котик! Я буду напоминать тебе пить таблетки три раза в день ❤️")
 
-# Отправка напоминания
 async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     user_id = job.data["user_id"]
-    dose = job.data.get("dose", 1)
+    pill_time = job.data["pill_time"]
+    today = get_today()
 
-    # Разные сообщения для разных приёмов
-    messages = {
-        1: "Котик, пора пить утреннюю таблеточку! 🌞",
-        2: "Котик, не забудь про дневную таблеточку! ☀️",
-        3: "Котик, выпей вечернюю таблеточку перед сном 💤",
-    }
-    text = messages.get(dose, "Котик, выпей таблеточку 🐱")
+    data = load_data()
+    if today not in data["history"]:
+        data["history"][today] = {"утренняя": False, "дневная": False, "вечерняя": False}
+    save_data(data)
 
     await context.bot.send_message(
         chat_id=user_id,
-        text=text,
+        text=f"Котик, пора пить {pill_time} таблеточку! 💊\nПожалуйста, не забудь ❤️",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Выпила", callback_data=f"taken_{dose}")]
+            [InlineKeyboardButton("✅ Выпила", callback_data=f"taken_{pill_time}")]
         ])
     )
 
-# Обработка кнопки
+    context.job_queue.run_once(
+        check_if_taken,
+        when=3600,
+        data={"user_id": user_id, "date": today, "pill_time": pill_time},
+        name=f"check_{today}_{pill_time}"
+    )
+
+async def check_if_taken(context: ContextTypes.DEFAULT_TYPE):
+    job_data = context.job.data
+    user_id = job_data["user_id"]
+    date = job_data["date"]
+    pill_time = job_data["pill_time"]
+
+    data = load_data()
+    taken = data["history"].get(date, {}).get(pill_time, False)
+
+    if not taken:
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_USER_ID,
+                text=f"⚠️ Твоя котик-девушка ещё не отметила приём {pill_time} таблетки ({date}).\nМожет, стоит нежно напомнить? 💬"
+            )
+        except Exception as e:
+            logger.error(f"Не удалось отправить уведомление админу: {e}")
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
+    
     user_id = query.from_user.id
     data = load_data()
-
+    
     if data.get("user_id") != user_id:
         await query.edit_message_text(text="Это не твоя таблетка 😉")
         return
 
-    # Сохраняем факт приёма
-    data["last_taken"] = datetime.now().isoformat()
+    pill_time = query.data.replace("taken_", "")
+    today = get_today()
+
+    if today not in data["history"]:
+        data["history"][today] = {"утренняя": False, "дневная": False, "вечерняя": False}
+    data["history"][today][pill_time] = True
     save_data(data)
 
-    # Похвала
-    await query.edit_message_text(text=MOTIVATIONAL_PHRASES[0])
+    await query.edit_message_text(text=f"Отлично! {pill_time.capitalize()} таблеточка принята! 🌟")
 
-# Планировщик всех напоминаний
-async def schedule_all_reminders(app: Application):
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_USER_ID,
+            text=f"✅ Твоя котик-девушка только что выпила {pill_time} таблеточку! 🐾\nВремя: {datetime.now().strftime('%d.%m в %H:%M')}"
+        )
+    except Exception as e:
+        logger.error(f"Не удалось отправить уведомление админу: {e}")
+
+# Ежедневный отчёт в 23:30 МСК (20:30 UTC)
+async def daily_report(context: ContextTypes.DEFAULT_TYPE):
     data = load_data()
     user_id = data.get("user_id")
     if not user_id:
         return
 
-    # ⚠️ ЗАМЕНИ ЧАСОВОЙ ПОЯС ПОД СЕБЯ!
-    # Примеры:
-    # Москва, Минск       → timedelta(hours=3)
-    # Киев, Рига          → timedelta(hours=2)
-    # Екатеринбург        → timedelta(hours=5)
-    # Лондон              → timedelta(hours=0)
-    # Нью-Йорк (летом)    → timedelta(hours=-4)
-    tz = timezone(timedelta(hours=3))  # ← ИЗМЕНИ ЭТО!
+    today = get_today()
+    day_data = data["history"].get(today, {"утренняя": False, "дневная": False, "вечерняя": False})
 
-    times = [
-        time(10, 0, tzinfo=tz),   # утро
-        time(14, 0, tzinfo=tz),   # день
-        time(23, 0, tzinfo=tz),   # ночь
-    ]
+    taken_count = sum(day_data.values())
+    total = 3
 
-    for i, t in enumerate(times):
-        app.job_queue.run_daily(
-            send_reminder,
-            time=t,
-            data={"user_id": user_id, "dose": i + 1},
-            name=f"reminder_dose_{i+1}"
+    status_lines = []
+    for pill in ["утренняя", "дневная", "вечерняя"]:
+        status = "✅" if day_data.get(pill) else "❌"
+        status_lines.append(f"{status} {pill.capitalize()}")
+
+    message = "📊 Сегодняшний приём таблеток:\n" + "\n".join(status_lines)
+    message += f"\n\nИтого: {taken_count} из {total} 💊"
+
+    if taken_count == 3:
+        message += "\n\nТы молодец! Полный успех! 🌈"
+    elif taken_count == 0:
+        message += "\n\nЗавтра всё получится! Я верю в тебя! 💖"
+
+    await context.bot.send_message(chat_id=user_id, text=message)
+
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_USER_ID,
+            text=f"📆 Отчёт за {today}:\n{taken_count}/3 приёмов"
         )
-        logger.info(f"Запланировано напоминание на {t}")
+    except Exception as e:
+        logger.error(f"Не удалось отправить отчёт админу: {e}")
 
-# Основная функция
+# Еженедельный отчёт (воскресенье, 23:30 МСК)
+async def weekly_report(context: ContextTypes.DEFAULT_TYPE):
+    data = load_data()
+    user_id = data.get("user_id")
+    if not user_id:
+        return
+
+    today = datetime.utcnow().date()
+    dates = [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
+    
+    total_taken = 0
+    total_possible = 0
+
+    for d in dates:
+        day_data = data["history"].get(d, {"утренняя": False, "дневная": False, "вечерняя": False})
+        total_taken += sum(day_data.values())
+        total_possible += 3
+
+    message = (
+        f"📈 Недельная статистика:\n"
+        f"Ты приняла {total_taken} из {total_possible} таблеток! 🌟\n\n"
+    )
+
+    if total_taken == total_possible:
+        message += "Ты невероятна! 100% — это круто! ✨"
+    elif total_taken / total_possible >= 0.8:
+        message += "Отличный результат! Так держать! 💪"
+    elif total_taken / total_possible >= 0.5:
+        message += "Хорошо стараешься! Продолжай в том же духе! 🌈"
+    else:
+        message += "Я знаю, ты можешь лучше! Завтра — новый шанс! 💖"
+
+    await context.bot.send_message(chat_id=user_id, text=message)
+
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_USER_ID,
+            text=f"📊 Недельный отчёт:\n{total_taken}/{total_possible} таблеток"
+        )
+    except Exception as e:
+        logger.error(f"Не удалось отправить недельный отчёт админу: {e}")
+
+# Планировщик
+async def schedule_jobs(app: Application):
+    data = load_data()
+    user_id = data.get("user_id")
+    if not user_id:
+        return
+
+    job_queue = app.job_queue
+
+    for pill in SCHEDULE:
+        job_queue.run_daily(
+            send_reminder,
+            time=pill["time_utc"],
+            data={"user_id": user_id, "pill_time": pill["label"]},
+            name=f"reminder_{pill['label']}"
+        )
+
+    job_queue.run_daily(
+        daily_report,
+        time=time(20, 30),
+        name="daily_report"
+    )
+
+    job_queue.run_daily(
+        weekly_report,
+        time=time(20, 30),
+        days=(6,),
+        name="weekly_report"
+    )
+
 def main():
     application = Application.builder().token(TOKEN).build()
-
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_callback, pattern=r"taken_\d"))
-
-    # Запуск планировщика после старта
-    application.job_queue.run_once(schedule_all_reminders, when=1)
-
+    application.add_handler(CallbackQueryHandler(button_callback, pattern=r"taken_.*"))
+    application.job_queue.run_once(schedule_jobs, when=1)
     application.run_polling()
 
 if __name__ == '__main__':
